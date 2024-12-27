@@ -1,0 +1,139 @@
+#!/usr/bin/env ruby
+
+require 'httparty'
+require 'dotenv'
+require 'date'
+
+Dotenv.load
+
+class DesktimeAPI
+  BASE_URL = 'https://desktime.com/api/v2'
+  SECONDS_TO_HOURS = 3600.0
+  
+  def initialize
+    @api_key = ENV['DESKTIME_API_KEY']
+    @employee_id = ENV['EMPLOYEE_ID']
+    raise 'DESKTIME_API_KEY environment variable is not set' unless @api_key
+    raise 'EMPLOYEE_ID environment variable is not set' unless @employee_id
+  end
+
+  def fetch_monthly_hours(date = Date.today)
+    date = Date.new(date.year, date.month, 1)
+
+    response = HTTParty.get(
+      "#{BASE_URL}/json/employees",
+      query: {
+        apiKey: @api_key,
+        date: date.strftime('%Y-%m-%d'),
+        period: 'month'
+      }
+    )
+
+    if response.success?
+      data = response.parsed_response
+      if data.is_a?(Hash) && data['employees']
+        process_monthly_data(data['employees'])
+      else
+        puts "Error: Unexpected response format"
+        puts "Response: #{data.inspect}"
+      end
+    else
+      puts "Error: #{response.code} - #{response.message}"
+    end
+  end
+
+  private
+
+  def process_monthly_data(data)
+    stats = {
+      days: [],
+      total_online: 0,
+      total_productive: 0,
+      total_desktime: 0
+    }
+
+    data.each do |date, employees|
+      employee_data = employees[@employee_id.to_s]
+      next unless employee_data
+
+      # Convert seconds to hours (API returns seconds)
+      online_time = employee_data['onlineTime'].to_i / SECONDS_TO_HOURS
+      next if online_time == 0
+
+      productive_time = employee_data['productiveTime'].to_i / SECONDS_TO_HOURS
+      desktime_time = employee_data['desktimeTime'].to_i / SECONDS_TO_HOURS
+
+      stats[:days] << {
+        date: Date.parse(date),
+        online: online_time,
+        productive: productive_time,
+        desktime: desktime_time,
+        productivity: productive_time > 0 ? (productive_time * 100.0 / online_time).round(2) : 0
+      }
+
+      stats[:total_online] += online_time
+      stats[:total_productive] += productive_time
+      stats[:total_desktime] += desktime_time
+    end
+
+    display_results(stats)
+  end
+
+  def format_duration(hours)
+    whole_hours = hours.to_i
+    minutes = ((hours - whole_hours) * 60).round
+    
+    if minutes == 60
+      whole_hours += 1
+      minutes = 0
+    end
+    
+    if whole_hours == 0
+      "#{minutes}m"
+    elsif minutes == 0
+      "#{whole_hours}h"
+    else
+      "#{whole_hours}h #{minutes}m"
+    end
+  end
+
+  def display_results(stats)
+    return puts "No data found for the period" if stats[:days].empty?
+
+    month_name = stats[:days].first[:date].strftime('%B %Y')
+    work_days = stats[:days].size
+    
+    puts "\nDesktime Statistics for #{month_name}"
+    puts "-------------------------------------"
+    puts "Work Days: #{work_days}"
+    
+    puts "\nTotal Time:"
+    puts "  Online Time: #{format_duration(stats[:total_online])}"
+    puts "  Productive Time: #{format_duration(stats[:total_productive])}"
+    puts "  Desktime Time: #{format_duration(stats[:total_desktime])}"
+    
+    puts "\nDaily Averages:"
+    puts "  Online Time: #{format_duration(stats[:total_online] / work_days)}"
+    puts "  Productive Time: #{format_duration(stats[:total_productive] / work_days)}"
+    
+    overall_productivity = stats[:total_productive] * 100.0 / stats[:total_online]
+    puts "  Overall Productivity: #{overall_productivity.round(2)}%"
+    
+    puts "\nMost Productive Days:"
+    stats[:days]
+      .sort_by { |day| [-day[:productivity], -day[:productive]] }
+      .first(3)
+      .each do |day|
+        puts "  #{day[:date].strftime('%Y-%m-%d')}: #{format_duration(day[:productive])} (#{day[:productivity]}% productive)"
+      end
+  end
+end
+
+# Run the script
+begin
+  desktime = DesktimeAPI.new
+  desktime.fetch_monthly_hours
+rescue StandardError => e
+  puts "Error: #{e.message}"
+  puts e.backtrace
+end
